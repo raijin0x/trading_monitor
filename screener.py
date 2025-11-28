@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Auto screener สำหรับ Mid-Cap และ Large-Cap จาก Yahoo Finance "Most Actives" screener
+Auto screener สำหรับ Mid-Cap, Large-Cap และ Forex จาก Yahoo Finance
 
-- เรียก endpoint predefined: MOST_ACTIVES  (25 ตัวที่เทรดเยอะสุดในวันนั้น)
-- กรอง mid-cap (marketCap ~ 2–10B) หรือ large-cap (marketCap > 10B)
+- Mid-Cap/Large-Cap: เรียก endpoint predefined: MOST_ACTIVES
+- Forex: ใช้ yfinance ดึงข้อมูล Forex pairs และกรองตาม volume/volatility
 - สร้าง:
-    - tickers_midcap.txt / tickers_largecap.txt
-    - Experiment Details/Candidate_MidCaps.csv / Candidate_LargeCaps.csv
+    - tickers_midcap.txt / tickers_largecap.txt / tickers_forex.txt
+    - Experiment Details/Candidate_MidCaps.csv / Candidate_LargeCaps.csv / Candidate_Forex.csv
 
 อ้างอิง endpoint:
 https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=25&scrIds=most_actives
@@ -15,6 +15,7 @@ https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?count=25&s
     python screener.py              # screen ทั้ง mid-cap และ large-cap
     python screener.py --type midcap    # screen เฉพาะ mid-cap
     python screener.py --type largecap  # screen เฉพาะ large-cap
+    python screener.py --type forex     # screen เฉพาะ forex
     python screener.py --type both      # screen ทั้งสอง (default)
 """
 
@@ -24,6 +25,7 @@ from typing import Any, Dict, List
 
 import pandas as pd  # type: ignore[import]
 import requests  # type: ignore[import]
+import yfinance as yf  # type: ignore[import]
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -36,7 +38,19 @@ OUT_CSV_MIDCAP = EXPERIMENT_DIR / "Candidate_MidCaps.csv"
 OUT_TXT_LARGECAP = ROOT_DIR / "tickers_largecap.txt"
 OUT_CSV_LARGECAP = EXPERIMENT_DIR / "Candidate_LargeCaps.csv"
 
+OUT_TXT_FOREX = ROOT_DIR / "tickers_forex.txt"
+OUT_CSV_FOREX = EXPERIMENT_DIR / "Candidate_Forex.csv"
+
 YH_URL = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
+
+# Major Forex Pairs (Yahoo Finance format: EURUSD=X)
+MAJOR_FOREX_PAIRS = [
+    "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X",
+    "USDCAD=X", "USDCHF=X", "NZDUSD=X", "EURGBP=X",
+    "EURJPY=X", "GBPJPY=X", "AUDJPY=X", "EURAUD=X",
+    "EURCAD=X", "GBPAUD=X", "GBPCAD=X", "AUDCAD=X",
+    "AUDNZD=X", "CADJPY=X", "CHFJPY=X", "EURCHF=X"
+]
 
 
 def fetch_most_actives(count: int = 25) -> List[Dict[str, Any]]:
@@ -185,16 +199,96 @@ def save_largecap_results(df: pd.DataFrame) -> None:
     print(f"Saved Candidate_LargeCaps.csv to {OUT_CSV_LARGECAP}")
 
 
+def screen_forex_pairs() -> pd.DataFrame:
+    """สแกน Forex pairs และกรองตาม volatility."""
+    print("Fetching Forex data from Yahoo Finance...")
+    
+    rows: List[Dict[str, Any]] = []
+    
+    for pair in MAJOR_FOREX_PAIRS:
+        try:
+            ticker = yf.Ticker(pair)
+            hist = ticker.history(period="5d", interval="1d")
+            
+            if hist.empty or len(hist) < 2:
+                print(f"  [SKIP] {pair}: No data")
+                continue
+            
+            # คำนวณ metrics
+            current_price = hist['Close'].iloc[-1]
+            # Forex ไม่มี volume แบบหุ้น แต่ yfinance อาจมีค่าเป็น 0 หรือ NaN
+            avg_volume = hist['Volume'].mean() if 'Volume' in hist.columns and not hist['Volume'].isna().all() else 0
+            
+            # คำนวณ volatility (ATR-like: average true range)
+            high_low = (hist['High'] - hist['Low']).mean()
+            volatility_pct = (high_low / current_price) * 100 if current_price > 0 else 0
+            
+            # คำนวณ price change (5-day)
+            price_change = ((hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100
+            
+            # แปลง pair name (EURUSD=X -> EURUSD)
+            pair_name = pair.replace("=X", "")
+            
+            rows.append({
+                "Ticker": pair_name,
+                "Yahoo_Symbol": pair,
+                "Current_Price": round(current_price, 5),
+                "Avg_Volume": int(avg_volume) if avg_volume and not pd.isna(avg_volume) else 0,
+                "Volatility_%": round(volatility_pct, 3),
+                "Price_Change_5d_%": round(price_change, 2)
+            })
+            print(f"  [OK] {pair_name}: Price={current_price:.5f}, Volatility={volatility_pct:.3f}%")
+            
+        except Exception as e:
+            print(f"  [ERROR] {pair}: {str(e)}")
+            continue
+    
+    df = pd.DataFrame(rows)
+    if df.empty:
+        print("No Forex data retrieved.")
+        return pd.DataFrame(columns=["Ticker", "Yahoo_Symbol"])
+    
+    # กรองตามเงื่อนไข:
+    # 1. Volatility >= 0.1% (Forex มี volatility ต่ำกว่า stocks)
+    # 2. ไม่กรอง Volume เพราะ Forex ไม่มี volume แบบหุ้น
+    df = df[df["Volatility_%"] >= 0.1]
+    
+    # เรียงตาม volatility (สูงสุดก่อน)
+    df = df.sort_values("Volatility_%", ascending=False)
+    df = df.reset_index(drop=True)
+    
+    print(f"Passed Forex filters: {len(df)} pairs")
+    return df
+
+
+def save_forex_results(df: pd.DataFrame) -> None:
+    """บันทึกผล Forex ลงไฟล์ text + CSV."""
+    if df.empty:
+        print("No Forex pairs to save.")
+        return
+    
+    # ใช้ Yahoo_Symbol สำหรับ tickers_forex.txt (พร้อม =X)
+    tickers = df["Yahoo_Symbol"].tolist()
+    
+    # เขียนไฟล์ text
+    OUT_TXT_FOREX.write_text("\n".join(tickers), encoding="utf-8")
+    print(f"Saved {len(tickers)} Forex pairs to {OUT_TXT_FOREX}")
+    
+    # เขียนไฟล์ CSV (มีข้อมูลเพิ่มเติม)
+    df.to_csv(OUT_CSV_FOREX, index=False)
+    print(f"Saved Candidate_Forex.csv to {OUT_CSV_FOREX}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Screen Mid-Cap และ Large-Cap stocks จาก Yahoo Finance Most Actives"
+        description="Screen Mid-Cap, Large-Cap stocks และ Forex pairs จาก Yahoo Finance"
     )
     parser.add_argument(
         "--type",
         type=str,
-        choices=["midcap", "largecap", "both"],
+        choices=["midcap", "largecap", "forex", "both"],
         default="both",
-        help="ประเภทหุ้นที่จะ screen (default: both)",
+        help="ประเภทที่จะ screen (default: both)",
     )
 
     args = parser.parse_args()
@@ -212,8 +306,15 @@ def main() -> None:
         print("=" * 50)
         df_largecap = screen_largecap_from_most_actives()
         save_largecap_results(df_largecap)
+    
+    if args.type == "forex":
+        print("\n" + "=" * 50)
+        print("Screening Forex Pairs...")
+        print("=" * 50)
+        df_forex = screen_forex_pairs()
+        save_forex_results(df_forex)
 
-    print("\n✅ Screening completed!")
+    print("\n[OK] Screening completed!")
 
 
 if __name__ == "__main__":

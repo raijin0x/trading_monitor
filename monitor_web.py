@@ -105,6 +105,31 @@ def load_crypto_from_json() -> list[str]:
     return out
 
 
+def load_forex_from_json() -> list[str]:
+    """อ่าน tickers.json แล้วคืนลิสต์ forex เป็นตัวพิมพ์ใหญ่"""
+    if not TICKERS_JSON.exists():
+        return []
+
+    with TICKERS_JSON.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+
+    arr = data.get("forex", [])
+    if not isinstance(arr, list):
+        return []
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in arr:
+        if not isinstance(t, str):
+            continue
+        up = t.strip().upper()
+        if not up or up in seen:
+            continue
+        seen.add(up)
+        out.append(up)
+    return out
+
+
 def fetch_stock_data(tickers: list[str]) -> list[dict]:
     """ดึงข้อมูลหุ้นล่าสุด: Price, Change, %Change, Volume, High, Low"""
     if not tickers:
@@ -286,6 +311,108 @@ def fetch_crypto_data(tickers: list[str]) -> list[dict]:
                 # ไม่สามารถดึงข้อมูลได้
                 results.append({
                     "ticker": ticker,
+                    "price": None,
+                    "change": None,
+                    "change_pct": None,
+                    "volume": None,
+                    "high": None,
+                    "low": None,
+                })
+
+    return results
+
+
+def fetch_forex_data(tickers: list[str]) -> list[dict]:
+    """ดึงข้อมูล Forex pairs ล่าสุด: Price, Change, %Change, High, Low"""
+    if not tickers:
+        return []
+
+    results = []
+
+    for ticker in tickers:
+        try:
+            ticker_obj = yf.Ticker(ticker)
+            info = ticker_obj.info
+
+            # ดึงราคาปัจจุบัน
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice") or None
+            prev_close = info.get("previousClose") or current_price
+
+            # คำนวณ change
+            if current_price is not None and prev_close is not None and pd.notna(current_price) and pd.notna(prev_close):
+                change = float(current_price) - float(prev_close)
+                change_pct = (change / float(prev_close) * 100) if prev_close != 0 else None
+            else:
+                change = None
+                change_pct = None
+
+            # ดึงข้อมูลอื่น ๆ
+            high = info.get("dayHigh") or info.get("regularMarketDayHigh") or None
+            low = info.get("dayLow") or info.get("regularMarketDayLow") or None
+
+            # แปลง ticker name (EURUSD=X -> EURUSD)
+            display_ticker = ticker.replace("=X", "")
+
+            results.append({
+                "ticker": display_ticker,
+                "price": float(current_price) if current_price is not None and pd.notna(current_price) else None,
+                "change": float(change) if change is not None else None,
+                "change_pct": float(change_pct) if change_pct is not None else None,
+                "volume": None,  # Forex ไม่มี volume
+                "high": float(high) if high is not None and pd.notna(high) else None,
+                "low": float(low) if low is not None and pd.notna(low) else None,
+            })
+
+        except Exception:
+            # ถ้า .info ไม่ได้ ให้ลองใช้ download
+            try:
+                df = yf.download(ticker, period="5d", interval="1d", progress=False, timeout=10)
+                if not df.empty and len(df) > 0:
+                    latest = df.iloc[-1]
+                    prev = df.iloc[-2] if len(df) > 1 else latest
+
+                    current_price = latest.get("Close", None)
+                    prev_close = prev.get("Close", current_price)
+
+                    if current_price is not None and prev_close is not None and pd.notna(current_price) and pd.notna(prev_close):
+                        change = float(current_price) - float(prev_close)
+                        change_pct = (change / float(prev_close) * 100) if prev_close != 0 else None
+                    else:
+                        change = None
+                        change_pct = None
+
+                    h = latest.get("High", None)
+                    l = latest.get("Low", None)
+
+                    # แปลง ticker name
+                    display_ticker = ticker.replace("=X", "")
+
+                    results.append({
+                        "ticker": display_ticker,
+                        "price": float(current_price) if current_price is not None and pd.notna(current_price) else None,
+                        "change": float(change) if change is not None else None,
+                        "change_pct": float(change_pct) if change_pct is not None else None,
+                        "volume": None,
+                        "high": float(h) if h is not None and pd.notna(h) else None,
+                        "low": float(l) if l is not None and pd.notna(l) else None,
+                    })
+                else:
+                    # ไม่มีข้อมูลเลย
+                    display_ticker = ticker.replace("=X", "")
+                    results.append({
+                        "ticker": display_ticker,
+                        "price": None,
+                        "change": None,
+                        "change_pct": None,
+                        "volume": None,
+                        "high": None,
+                        "low": None,
+                    })
+            except Exception:
+                # ไม่สามารถดึงข้อมูลได้
+                display_ticker = ticker.replace("=X", "")
+                results.append({
+                    "ticker": display_ticker,
                     "price": None,
                     "change": None,
                     "change_pct": None,
@@ -541,6 +668,28 @@ HTML_TEMPLATE = """
                 </tbody>
             </table>
         </div>
+        
+        <div class="table-container">
+            <div class="section-title">💱 Forex Pairs</div>
+            <div id="loading-forex" class="loading">
+                <div class="spinner"></div>
+                <div>Loading forex data...</div>
+            </div>
+            <table id="forex-table" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Pair</th>
+                        <th>Price</th>
+                        <th>Change</th>
+                        <th>Change %</th>
+                        <th>High</th>
+                        <th>Low</th>
+                    </tr>
+                </thead>
+                <tbody id="forex-tbody">
+                </tbody>
+            </table>
+        </div>
     </div>
     
     <script>
@@ -639,6 +788,67 @@ HTML_TEMPLATE = """
             document.getElementById(tableId).style.display = 'table';
         }
         
+        function renderForexTable(data, tbodyId, loadingId, tableId) {
+            const tbody = document.getElementById(tbodyId);
+            const tableKey = tableId;
+            
+            if (data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666;">No data available</td></tr>';
+                document.getElementById(loadingId).style.display = 'none';
+                document.getElementById(tableId).style.display = 'table';
+                return;
+            }
+            
+            // Create a map of existing rows for comparison
+            const existingRows = {};
+            Array.from(tbody.children).forEach(row => {
+                const ticker = row.querySelector('.ticker')?.textContent;
+                if (ticker) {
+                    existingRows[ticker] = row;
+                }
+            });
+            
+            // Clear and rebuild
+            tbody.innerHTML = '';
+            
+            data.forEach(item => {
+                const row = document.createElement('tr');
+                const priceKey = `${tableKey}-${item.ticker}`;
+                const prevPrice = previousPrices[priceKey];
+                const currentPrice = item.price;
+                
+                // Determine if price changed
+                let priceClass = 'price';
+                if (prevPrice !== undefined && currentPrice !== null && prevPrice !== null) {
+                    if (currentPrice > prevPrice) {
+                        priceClass = 'price price-updated';
+                    } else if (currentPrice < prevPrice) {
+                        priceClass = 'price price-downdated';
+                    }
+                }
+                
+                // Store current price for next comparison
+                previousPrices[priceKey] = currentPrice;
+                
+                const changeClass = getChangeClass(item.change);
+                const changePctClass = getChangeClass(item.change_pct);
+                
+                row.innerHTML = `
+                    <td class="ticker">${item.ticker}</td>
+                    <td class="${priceClass}">${formatNumber(item.price)}</td>
+                    <td class="${changeClass}">${formatChange(item.change)}</td>
+                    <td class="${changePctClass}">${formatChangePct(item.change_pct)}</td>
+                    <td>${formatNumber(item.high)}</td>
+                    <td>${formatNumber(item.low)}</td>
+                `;
+                
+                tbody.appendChild(row);
+            });
+            
+            document.getElementById(loadingId).style.display = 'none';
+            document.getElementById(tableId).style.display = 'table';
+        }
+        
         async function fetchData() {
             try {
                 // Fetch stocks (mid-cap)
@@ -656,6 +866,11 @@ HTML_TEMPLATE = """
                 const cryptoData = await cryptoResponse.json();
                 renderTable(cryptoData, 'crypto-tbody', 'loading-crypto', 'crypto-table');
                 
+                // Fetch forex
+                const forexResponse = await fetch('/api/forex');
+                const forexData = await forexResponse.json();
+                renderForexTable(forexData, 'forex-tbody', 'loading-forex', 'forex-table');
+                
                 document.getElementById('timestamp').textContent = 
                     'Last updated: ' + new Date().toLocaleString('th-TH');
                 
@@ -666,6 +881,8 @@ HTML_TEMPLATE = """
                 document.getElementById('loading-largecap').innerHTML = 
                     '<div style="color: #ef4444;">Error loading data. Please refresh the page.</div>';
                 document.getElementById('loading-crypto').innerHTML = 
+                    '<div style="color: #ef4444;">Error loading data. Please refresh the page.</div>';
+                document.getElementById('loading-forex').innerHTML = 
                     '<div style="color: #ef4444;">Error loading data. Please refresh the page.</div>';
             }
         }
@@ -722,6 +939,14 @@ def api_crypto():
     return jsonify(data)
 
 
+@app.route("/api/forex")
+def api_forex():
+    """API endpoint สำหรับดึงข้อมูล Forex pairs"""
+    tickers = load_forex_from_json()
+    data = fetch_forex_data(tickers)
+    return jsonify(data)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Monitor ราคาหุ้นผ่าน Web Browser")
     parser.add_argument(
@@ -739,9 +964,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    print(f"\n🚀 Starting Stock & Crypto Monitor Web Server...")
+    print(f"\n🚀 Starting Stock, Crypto & Forex Monitor Web Server...")
     print(f"📊 Open your browser and go to: http://{args.host}:{args.port}")
-    print(f"📈 Monitoring: Mid-Cap Stocks, Large-Cap Stocks, & Cryptocurrencies")
+    print(f"📈 Monitoring: Mid-Cap Stocks, Large-Cap Stocks, Cryptocurrencies & Forex Pairs")
     print(f"⏹️  Press Ctrl+C to stop the server\n")
 
     app.run(host=args.host, port=args.port, debug=False)

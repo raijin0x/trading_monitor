@@ -36,6 +36,28 @@
     "ADA-USD",
     "DOGE-USD",
     "AVAX-USD"
+  ],
+  "forex": [
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "AUDUSD=X",
+    "USDCAD=X",
+    "USDCHF=X",
+    "NZDUSD=X",
+    "EURGBP=X",
+    "EURJPY=X",
+    "GBPJPY=X",
+    "AUDJPY=X",
+    "EURAUD=X",
+    "EURCAD=X",
+    "GBPAUD=X",
+    "GBPCAD=X",
+    "AUDCAD=X",
+    "AUDNZD=X",
+    "CADJPY=X",
+    "CHFJPY=X",
+    "EURCHF=X"
   ]
 }
 
